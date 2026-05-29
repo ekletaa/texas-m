@@ -23,6 +23,7 @@ def detect_platform(url):
     return None
 
 def download_video(url, platform):
+    # تنظيف الملفات القديمة جداً (أكثر من 15 دقيقة)
     now = time.time()
     for f in os.listdir(DOWNLOAD_FOLDER):
         fpath = os.path.join(DOWNLOAD_FOLDER, f)
@@ -33,10 +34,11 @@ def download_video(url, platform):
             pass
 
     unique_id = uuid.uuid4().hex
-    output_template = os.path.join(DOWNLOAD_FOLDER, f'{unique_id}_%(title).50s.%(ext)s')
-
+    # اسم مؤقت فريد
+    temp_template = os.path.join(DOWNLOAD_FOLDER, f'{unique_id}_%(title).50s.%(ext)s')
+    
     opts = {
-        'outtmpl': output_template,
+        'outtmpl': temp_template,
         'quiet': True,
         'no_warnings': True,
         'format': 'best[ext=mp4]/best',
@@ -50,19 +52,42 @@ def download_video(url, platform):
     try:
         with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=True)
-            time.sleep(2)
+            time.sleep(2)  # انتظار اكتمال الكتابة
+
+            # البحث عن الملف الذي يبدأ بـ unique_id
+            found = None
             for f in os.listdir(DOWNLOAD_FOLDER):
-                if f.startswith(unique_id) and f.endswith(('.mp4', '.mkv', '.webm')):
-                    return {'success': True, 'filename': f, 'title': info.get('title', 'video')[:60], 'platform': platform}
-            video_files = []
-            for f in os.listdir(DOWNLOAD_FOLDER):
-                if f.endswith(('.mp4', '.mkv', '.webm')):
-                    video_files.append(os.path.join(DOWNLOAD_FOLDER, f))
-            if video_files:
-                latest = max(video_files, key=os.path.getctime)
-                if time.time() - os.path.getctime(latest) < 60:
-                    return {'success': True, 'filename': os.path.basename(latest), 'title': info.get('title', 'video')[:60], 'platform': platform}
-            return {'success': False, 'error': 'لم يتم العثور على ملف التحميل'}
+                if f.startswith(unique_id) and f.endswith(('.mp4', '.mkv', '.webm', '.mov')):
+                    found = os.path.join(DOWNLOAD_FOLDER, f)
+                    break
+
+            # إذا لم يعثر، خذ أحدث ملف فيديو (احتياط)
+            if not found:
+                video_files = []
+                for f in os.listdir(DOWNLOAD_FOLDER):
+                    if f.endswith(('.mp4', '.mkv', '.webm', '.mov')):
+                        video_files.append(os.path.join(DOWNLOAD_FOLDER, f))
+                if video_files:
+                    latest = max(video_files, key=os.path.getctime)
+                    if time.time() - os.path.getctime(latest) < 60:
+                        found = latest
+
+            if not found:
+                return {'success': False, 'error': 'لم يتم العثور على ملف التحميل'}
+
+            # إعادة تسمية الملف إلى اسم ثابت وآمن: unique_id.mp4
+            final_filename = f'{unique_id}.mp4'
+            final_path = os.path.join(DOWNLOAD_FOLDER, final_filename)
+            os.rename(found, final_path)
+            logger.info(f"تم حفظ الملف: {final_filename}")
+
+            return {
+                'success': True,
+                'filename': final_filename,
+                'title': info.get('title', 'video')[:60],
+                'platform': platform
+            }
+
     except Exception as e:
         logger.error(f"Download error: {traceback.format_exc()}")
         return {'success': False, 'error': f'خطأ أثناء التحميل: {str(e)[:150]}'}
@@ -73,8 +98,9 @@ def delete_file_later(filepath, delay=600):
         try:
             if os.path.exists(filepath):
                 os.remove(filepath)
-        except:
-            pass
+                logger.info(f"تم حذف الملف: {filepath}")
+        except Exception as e:
+            logger.error(f"خطأ في حذف الملف: {e}")
     threading.Thread(target=_delete, daemon=True).start()
 
 @app.route('/')
@@ -100,8 +126,13 @@ def download():
         if result['success']:
             filepath = os.path.join(DOWNLOAD_FOLDER, result['filename'])
             download_url = f"/file/{result['filename']}"
-            delete_file_later(filepath, 600)
-            return jsonify({'success': True, 'download_url': download_url, 'title': result['title'], 'platform': platform})
+            delete_file_later(filepath, 600)  # 10 دقائق
+            return jsonify({
+                'success': True,
+                'download_url': download_url,
+                'title': result['title'],
+                'platform': platform
+            })
         else:
             return jsonify({'success': False, 'error': result['error']}), 400
     except Exception as e:
@@ -114,6 +145,7 @@ def serve_file(filename):
         abort(404)
     filepath = os.path.join(DOWNLOAD_FOLDER, filename)
     if not os.path.exists(filepath):
+        logger.warning(f"طلب ملف غير موجود: {filename}")
         abort(404)
     return send_file(filepath, as_attachment=True)
 
